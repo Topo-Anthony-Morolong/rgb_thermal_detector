@@ -1,7 +1,16 @@
 """
-Central configuration for the RGB+Thermal two-stream detector.
-Edit paths and hyperparameters here rather than scattering magic numbers
-through the codebase.
+Central configuration for two independent single-modality detectors
+(one RGB, one thermal) trained on FLIR ADAS v2's images_rgb_train and
+images_thermal_train sets as-is.
+
+Why two separate models instead of one fused model: FLIR ADAS v2's
+images_thermal_train/images_rgb_train are NOT frame-paired (confirmed via
+diagnose_pairing.py -- separate independently-sampled stills, 0% filename
+overlap, no cross-modal pointer in the annotation metadata). Real
+frame-synced pairs only exist in the much smaller video_rgb_test /
+video_thermal_test split. So rather than force a fusion architecture onto
+data that isn't actually paired, we train one detector per modality on the
+full annotated set each modality actually has.
 """
 
 from dataclasses import dataclass, field
@@ -9,44 +18,51 @@ from typing import List, Tuple
 
 
 @dataclass
+class ModalityConfig:
+    """Paths + settings for one modality (RGB or thermal)."""
+    name: str                      # "rgb" | "thermal" -- used in checkpoint/log naming
+    in_channels: int                # 3 for RGB, 1 for thermal
+    train_ann: str
+    train_dir: str
+    val_ann: str
+    val_dir: str
+    pretrained: bool                # ImageNet weights make sense for RGB, not for raw thermal
+
+
+@dataclass
 class DataConfig:
     # FLIR ADAS v2 layout (adjust to match your download):
-    #   root/images_rgb_train/data/*.jpg
-    #   root/images_thermal_train/data/*.jpg (or .tiff/.png, 8-bit thermal)
-    #   root/images_thermal_train/coco.json      <- primary annotations (thermal FOV)
-    #   root/images_rgb_train/coco.json          <- optional, only used if align_mode="none"
+    #   root/images_rgb_train/{data/, coco.json}
+    #   root/images_thermal_train/{data/, coco.json}
+    #   root/images_rgb_val/{data/, coco.json}
+    #   root/images_thermal_val/{data/, coco.json}
     root: str = "/path/to/FLIR_ADAS_v2"
-    train_thermal_ann: str = "images_thermal_train/coco.json"
-    train_thermal_dir: str = "images_thermal_train/data"
-    train_rgb_dir: str = "images_rgb_train/data"
 
-    val_thermal_ann: str = "images_thermal_val/coco.json"
-    val_thermal_dir: str = "images_thermal_val/data"
-    val_rgb_dir: str = "images_rgb_val/data"
-
-    # FLIR's RGB and thermal sensors have different FOV/resolution and are
-    # NOT pixel-aligned out of the box. Options:
-    #   "resize"  - naive resize-to-match (fast, works for a first baseline,
-    #               but boxes drawn from thermal annotations will be slightly
-    #               off in the RGB frame near image edges)
-    #   "homography" - supply a 3x3 homography (per-camera, from FLIR's
-    #               calibration files) to warp RGB into the thermal frame
-    #               before resizing. Set `homography_path` below if used.
-    align_mode: str = "resize"
-    homography_path: str = ""  # numpy .npy file with a 3x3 matrix, if align_mode="homography"
-
-    img_size: Tuple[int, int] = (512, 640)  # (H, W), fed to both streams
+    img_size: Tuple[int, int] = (512, 640)  # (H, W)
     num_classes: int = 3  # FLIR ADAS core classes: person, bicycle, car (extend as needed)
     class_names: List[str] = field(default_factory=lambda: ["person", "bicycle", "car"])
+
+    rgb: ModalityConfig = field(default_factory=lambda: ModalityConfig(
+        name="rgb", in_channels=3,
+        train_ann="images_rgb_train/coco.json", train_dir="images_rgb_train/data",
+        val_ann="images_rgb_val/coco.json", val_dir="images_rgb_val/data",
+        pretrained=True,
+    ))
+    thermal: ModalityConfig = field(default_factory=lambda: ModalityConfig(
+        name="thermal", in_channels=1,
+        train_ann="images_thermal_train/coco.json", train_dir="images_thermal_train/data",
+        val_ann="images_thermal_val/coco.json", val_dir="images_thermal_val/data",
+        pretrained=False,
+    ))
+
+    def modality(self, name: str) -> ModalityConfig:
+        return {"rgb": self.rgb, "thermal": self.thermal}[name]
 
 
 @dataclass
 class ModelConfig:
     backbone: str = "resnet18"  # "resnet18" | "resnet34" | "tinycnn"
-    pretrained_rgb: bool = True     # ImageNet weights make sense for the 3-channel RGB stream
-    pretrained_thermal: bool = False  # thermal is single-channel; ImageNet weights don't transfer directly
-    fusion_stages: Tuple[str, ...] = ("layer2", "layer3", "layer4")  # which backbone stages to fuse
-    fusion_type: str = "attention"  # "concat" | "add" | "attention"
+    fpn_stages: Tuple[str, ...] = ("layer2", "layer3", "layer4")
     fpn_channels: int = 128
     num_anchors_per_loc: int = 9  # 3 scales x 3 aspect ratios
 

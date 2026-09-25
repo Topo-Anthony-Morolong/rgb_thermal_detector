@@ -86,8 +86,13 @@ def main():
         print("   or check the metadata field printed above (if any) for a direct pointer")
         print("   from each thermal entry to its RGB counterpart.")
     else:
-        print("=> Same-stem matching looks reliable here — the existing dataset loader")
-        print("   in data/flir_dataset.py should work for this split as-is.")
+        print("=> Same-stem matching looks reliable here — real frame pairing may exist")
+        print("   for this split. Note: this project now trains two independent")
+        print("   single-modality detectors (data/coco_detection_dataset.py, no pairing")
+        print("   needed) since FLIR ADAS v2's main train/val split isn't paired. If you")
+        print("   want to revisit feature-level fusion on this paired data, see the")
+        print("   'What's implemented vs. what you'll likely want to add' section of")
+        print("   README.md.")
 
 
 if __name__ == "__main__":

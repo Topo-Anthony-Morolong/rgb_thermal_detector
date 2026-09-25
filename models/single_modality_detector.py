@@ -1,38 +1,40 @@
 """
-Full model: two backbones (RGB, thermal) -> multi-stage fusion -> FPN neck
--> shared detection head. Also exposes a `predict()` convenience method
-that decodes raw logits into NMS'd boxes for inference.
+Single-modality detector: one backbone -> FPN neck -> shared detection head.
+Same RetinaNet-style architecture as before, minus the cross-modal fusion
+step -- used to train an RGB-only and a thermal-only model independently,
+since FLIR ADAS v2's RGB/thermal train sets aren't frame-paired (see
+diagnose_pairing.py and the README).
 """
 
 import torch
 import torch.nn as nn
 
 from models.backbone import StreamBackbone
-from models.fusion import MultiStageFusion
 from models.head import FPNNeck, DetectionHead
 from utils.anchors import AnchorGenerator
 from utils.box_utils import decode_boxes, batched_nms
 
 
-class RGBThermalDetector(nn.Module):
-    def __init__(self, model_cfg, data_cfg):
+class SingleModalityDetector(nn.Module):
+    def __init__(self, model_cfg, data_cfg, in_channels: int, pretrained: bool):
         super().__init__()
-        self.fusion_stages = list(model_cfg.fusion_stages)
+        self.fpn_stages = list(model_cfg.fpn_stages)
         self.num_classes = data_cfg.num_classes
 
-        self.rgb_backbone = StreamBackbone(model_cfg.backbone, model_cfg.pretrained_rgb, in_channels=3)
-        self.thermal_backbone = StreamBackbone(model_cfg.backbone, model_cfg.pretrained_thermal, in_channels=1)
+        self.backbone = StreamBackbone(model_cfg.backbone, pretrained, in_channels=in_channels)
 
-        stage_channels = {s: self.rgb_backbone.out_channels(s) for s in self.fusion_stages}
-        self.fusion = MultiStageFusion(stage_channels, model_cfg.fusion_type, model_cfg.fpn_channels)
+        stage_channels = {s: self.backbone.out_channels(s) for s in self.fpn_stages}
+        self.lateral_proj = nn.ModuleDict({
+            s: nn.Conv2d(c, model_cfg.fpn_channels, kernel_size=1) for s, c in stage_channels.items()
+        })
 
-        self.neck = FPNNeck(model_cfg.fpn_channels, model_cfg.fpn_channels, levels=self.fusion_stages)
+        self.neck = FPNNeck(model_cfg.fpn_channels, model_cfg.fpn_channels, levels=self.fpn_stages)
         self.head = DetectionHead(model_cfg.fpn_channels, self.num_classes, model_cfg.num_anchors_per_loc)
 
         strides = {"layer1": 4, "layer2": 8, "layer3": 16, "layer4": 32}
         self.anchor_gen = AnchorGenerator(
-            base_sizes=[strides[s] * 4 for s in self.fusion_stages],  # base size ~4x stride, standard RetinaNet choice
-            strides=[strides[s] for s in self.fusion_stages],
+            base_sizes=[strides[s] * 4 for s in self.fpn_stages],  # base size ~4x stride, standard RetinaNet choice
+            strides=[strides[s] for s in self.fpn_stages],
         )
         self._anchor_cache = {}
 
@@ -43,23 +45,22 @@ class RGBThermalDetector(nn.Module):
             self._anchor_cache[key] = self.anchor_gen.generate([tuple(s) for s in shapes], device=device)
         return self._anchor_cache[key]
 
-    def forward(self, rgb: torch.Tensor, thermal: torch.Tensor):
-        rgb_feats = self.rgb_backbone(rgb)
-        thermal_feats = self.thermal_backbone(thermal)
-        fused = self.fusion(rgb_feats, thermal_feats)
-        feature_maps = self.neck(fused)
+    def forward(self, x: torch.Tensor):
+        feats = self.backbone(x)
+        projected = {s: self.lateral_proj[s](feats[s]) for s in self.fpn_stages}
+        feature_maps = self.neck(projected)
         cls_logits, box_deltas = self.head(feature_maps)
-        anchors = self._get_anchors(feature_maps, rgb.device)
+        anchors = self._get_anchors(feature_maps, x.device)
         return cls_logits, box_deltas, anchors
 
     @torch.no_grad()
-    def predict(self, rgb, thermal, score_thresh=0.3, nms_thresh=0.5, max_detections=100):
+    def predict(self, x, score_thresh=0.3, nms_thresh=0.5, max_detections=100):
         """Returns a list (len == batch) of dicts: {boxes, scores, labels}."""
-        cls_logits, box_deltas, anchors = self.forward(rgb, thermal)
+        cls_logits, box_deltas, anchors = self.forward(x)
         scores_all = torch.sigmoid(cls_logits)  # [B, A, C]
 
         results = []
-        for i in range(rgb.shape[0]):
+        for i in range(x.shape[0]):
             scores, labels = scores_all[i].max(dim=1)
             keep = scores > score_thresh
             if keep.sum() == 0:
@@ -67,8 +68,8 @@ class RGBThermalDetector(nn.Module):
                 continue
 
             boxes = decode_boxes(anchors[keep], box_deltas[i][keep])
-            boxes[:, 0::2] = boxes[:, 0::2].clamp(0, rgb.shape[-1])
-            boxes[:, 1::2] = boxes[:, 1::2].clamp(0, rgb.shape[-2])
+            boxes[:, 0::2] = boxes[:, 0::2].clamp(0, x.shape[-1])
+            boxes[:, 1::2] = boxes[:, 1::2].clamp(0, x.shape[-2])
 
             keep_idx = batched_nms(boxes, scores[keep], labels[keep], nms_thresh)[:max_detections]
             results.append({

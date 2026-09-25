@@ -1,36 +1,36 @@
 """
-Training entry point.
+Train one single-modality detector (RGB or thermal).
 
 Usage:
-    python train.py
+    python train.py --modality rgb
+    python train.py --modality thermal
 
-Edit config.py first (dataset paths, num_classes, hyperparameters).
+Run both to get two independent detectors. Edit config.py first (DATA.root,
+num_classes, hyperparameters).
 """
 
 import os
 import time
+import argparse
 import torch
 from torch.utils.data import DataLoader
 
 from config import DATA, MODEL, TRAIN
-from data.flir_dataset import FlirAdasDataset, collate_fn
-from models.detector import RGBThermalDetector
+from data.coco_detection_dataset import CocoDetectionDataset, collate_fn
+from models.single_modality_detector import SingleModalityDetector
 from models.loss import DetectionLoss
 
 
-def build_dataloaders():
-    train_set = FlirAdasDataset(
-        root=DATA.root, thermal_ann_path=DATA.train_thermal_ann,
-        thermal_dir=DATA.train_thermal_dir, rgb_dir=DATA.train_rgb_dir,
-        img_size=DATA.img_size, align_mode=DATA.align_mode,
-        homography_path=DATA.homography_path, train=True,
+def build_dataloaders(modality_cfg):
+    train_set = CocoDetectionDataset(
+        root=DATA.root, ann_path=modality_cfg.train_ann, image_dir=modality_cfg.train_dir,
+        img_size=DATA.img_size, in_channels=modality_cfg.in_channels,
     )
-    val_set = FlirAdasDataset(
-        root=DATA.root, thermal_ann_path=DATA.val_thermal_ann,
-        thermal_dir=DATA.val_thermal_dir, rgb_dir=DATA.val_rgb_dir,
-        img_size=DATA.img_size, align_mode=DATA.align_mode,
-        homography_path=DATA.homography_path, train=False,
+    val_set = CocoDetectionDataset(
+        root=DATA.root, ann_path=modality_cfg.val_ann, image_dir=modality_cfg.val_dir,
+        img_size=DATA.img_size, in_channels=modality_cfg.in_channels,
     )
+    print(f"[{modality_cfg.name}] train images: {len(train_set)}, val images: {len(val_set)}")
 
     train_loader = DataLoader(
         train_set, batch_size=TRAIN.batch_size, shuffle=True,
@@ -48,12 +48,12 @@ def run_epoch(model, loader, criterion, optimizer, scaler, device, train=True, e
     total_loss, total_cls, total_box, n_batches = 0.0, 0.0, 0.0, 0
     t0 = time.time()
 
-    for step, (rgb, thermal, targets) in enumerate(loader):
-        rgb, thermal = rgb.to(device, non_blocking=True), thermal.to(device, non_blocking=True)
+    for step, (imgs, targets) in enumerate(loader):
+        imgs = imgs.to(device, non_blocking=True)
 
         with torch.set_grad_enabled(train):
             with torch.autocast(device_type="cuda", enabled=(TRAIN.amp and device.type == "cuda")):
-                cls_logits, box_deltas, anchors = model(rgb, thermal)
+                cls_logits, box_deltas, anchors = model(imgs)
                 losses = criterion(cls_logits, box_deltas, anchors, targets)
 
             if train:
@@ -84,36 +84,42 @@ def run_epoch(model, loader, criterion, optimizer, scaler, device, train=True, e
 
 
 def main():
-    device = torch.device(TRAIN.device if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--modality", choices=["rgb", "thermal"], required=True)
+    args = parser.parse_args()
 
-    train_loader, val_loader = build_dataloaders()
-    model = RGBThermalDetector(MODEL, DATA).to(device)
+    modality_cfg = DATA.modality(args.modality)
+    device = torch.device(TRAIN.device if torch.cuda.is_available() else "cpu")
+    print(f"Training modality='{modality_cfg.name}' (in_channels={modality_cfg.in_channels}) on device: {device}")
+
+    train_loader, val_loader = build_dataloaders(modality_cfg)
+    model = SingleModalityDetector(MODEL, DATA, modality_cfg.in_channels, modality_cfg.pretrained).to(device)
     criterion = DetectionLoss(DATA.num_classes, TRAIN.focal_alpha, TRAIN.focal_gamma, TRAIN.box_loss_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=TRAIN.lr, weight_decay=TRAIN.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TRAIN.epochs)
     scaler = torch.cuda.amp.GradScaler() if (TRAIN.amp and device.type == "cuda") else None
 
-    os.makedirs(TRAIN.checkpoint_dir, exist_ok=True)
+    ckpt_dir = os.path.join(TRAIN.checkpoint_dir, modality_cfg.name)
+    os.makedirs(ckpt_dir, exist_ok=True)
     best_val_loss = float("inf")
 
     for epoch in range(TRAIN.epochs):
         train_stats = run_epoch(model, train_loader, criterion, optimizer, scaler, device, train=True, epoch=epoch)
-        print(f"[epoch {epoch}] train: {train_stats}")
+        print(f"[{modality_cfg.name}][epoch {epoch}] train: {train_stats}")
         scheduler.step()
 
         if epoch % TRAIN.val_every == 0:
             val_stats = run_epoch(model, val_loader, criterion, optimizer, scaler, device, train=False, epoch=epoch)
-            print(f"[epoch {epoch}] val:   {val_stats}")
+            print(f"[{modality_cfg.name}][epoch {epoch}] val:   {val_stats}")
 
-            ckpt_path = os.path.join(TRAIN.checkpoint_dir, "last.pt")
-            torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_stats["loss"]}, ckpt_path)
+            torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_stats["loss"],
+                        "modality": modality_cfg.name}, os.path.join(ckpt_dir, "last.pt"))
 
             if val_stats["loss"] < best_val_loss:
                 best_val_loss = val_stats["loss"]
-                torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_stats["loss"]},
-                           os.path.join(TRAIN.checkpoint_dir, "best.pt"))
-                print(f"[epoch {epoch}] new best val_loss={best_val_loss:.4f}, checkpoint saved")
+                torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_stats["loss"],
+                            "modality": modality_cfg.name}, os.path.join(ckpt_dir, "best.pt"))
+                print(f"[{modality_cfg.name}][epoch {epoch}] new best val_loss={best_val_loss:.4f}, checkpoint saved")
 
 
 if __name__ == "__main__":

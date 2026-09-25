@@ -1,113 +1,121 @@
-# RGB + Thermal Two-Stream Object Detector
+# RGB and Thermal Single-Modality Detectors (FLIR ADAS v2)
 
-A two-stream CNN detector for fused RGB/thermal object detection, built for
-FLIR ADAS-style data. RetinaNet-style single-stage architecture: two
-backbones, a fusion module, an FPN neck, and a shared detection head.
+Two independent RetinaNet-style object detectors — one trained on FLIR
+ADAS v2's RGB images, one on its thermal images — sharing the same
+architecture and training code, just different input channels and weights.
 
 ```
-RGB image  ──► ResNet stream (3ch)  ──┐
-                                        ├──► fusion (per FPN stage) ──► FPN neck ──► cls/box head ──► detections
-Thermal img──► ResNet stream (1ch)  ──┘
+RGB image     ──► ResNet backbone (3ch) ──► FPN neck ──► cls/box head ──► detections
+Thermal image ──► ResNet backbone (1ch) ──► FPN neck ──► cls/box head ──► detections
 ```
 
-## Why two streams instead of stacking channels
+## Why two separate models instead of one fused model
 
-You could concatenate RGB+thermal into a 4-channel input and run one
-backbone. Two independent streams are usually better here because:
+The original plan was a two-stream fusion detector (RGB + thermal feeding
+one model). That requires frame-paired RGB/thermal images. We checked this
+against the actual downloaded data with `diagnose_pairing.py` and found:
 
-- The two modalities have very different statistics (thermal is
-  single-channel, low dynamic range, no color/texture cues) — a shared
-  early conv stack has to compromise on filters that suit both.
-- It lets you initialize the RGB stream from ImageNet while training the
-  thermal stream from scratch, without averaging away the pretrained RGB
-  filters.
-- The fusion module can weight each modality per-location (see
-  `models/fusion.py`, `AttentionFusion`) — useful because thermal is more
-  reliable at night/in glare and RGB is more reliable for fine texture in
-  daylight. A single shared backbone can't express that trade-off as cleanly.
+- `images_thermal_train` has 10,742 annotated frames, `images_rgb_train` has
+  10,319 — different counts, so they can't be 1:1 pairs.
+- Filename stems don't match between the two folders at all (0% overlap).
+- Each image's `extra_info` field only carries scene-level metadata
+  (`hours`, `scene`, `video_id`, `weather`) — no pointer to a corresponding
+  image in the other modality.
+- Frame numbers sampled per video don't line up either (thermal sampled
+  every 15 frames from one offset, RGB sampled independently from another).
 
-## Fusion strategies
+So `images_rgb_train`/`images_thermal_train` are two separate,
+independently-sampled single-modality annotated sets — not a paired
+fusion dataset. (Real synced pairs do exist, in the much smaller
+`video_rgb_test`/`video_thermal_test` + `rgb_to_thermal_vid_map.json`,
+but that's sized as a test/eval split, not enough to train on.) Training
+one detector per modality uses each annotated set as it's actually built,
+instead of forcing a fusion architecture onto unpaired data.
 
-Set `MODEL.fusion_type` in `config.py`:
-- `"concat"` — channel concat + 1x1 conv. Strong, simple baseline.
-- `"add"` — projected sum. Cheapest.
-- `"attention"` — learned per-pixel gate between RGB and thermal features.
-  Recommended starting point; typically outperforms the other two on FLIR
-  ADAS in published two-stream fusion work, since it adapts to
-  day/night conditions instead of blending fixed proportions.
-
-Fusion happens independently at each of `MODEL.fusion_stages` (default:
-layer2/3/4), i.e. multi-scale fusion feeding into the FPN, not just a
-single late-fusion point.
-
-## Dataset setup (FLIR ADAS v2)
+## Dataset setup
 
 1. Download FLIR ADAS v2 from https://www.flir.com/oem/adas/adas-dataset-form/
-2. Expected layout:
+2. Expected layout (matches what `diagnose_pairing.py` confirmed against
+   your actual download):
    ```
    FLIR_ADAS_v2/
+     images_rgb_train/{data/, coco.json}
+     images_rgb_val/{data/, coco.json}
      images_thermal_train/{data/, coco.json}
-     images_rgb_train/{data/}
      images_thermal_val/{data/, coco.json}
-     images_rgb_val/{data/}
    ```
-3. Edit `config.py` → `DATA.root` to point at this folder.
-4. **Alignment caveat**: FLIR's RGB and thermal sensors have different FOV
-   and aren't pixel-aligned. `DATA.align_mode = "resize"` (default) just
-   resizes both frames independently and reuses thermal-frame boxes as an
-   approximation — a fine first baseline. For precise alignment, obtain
-   FLIR's per-scene calibration, convert it to a 3x3 homography, save it as
-   a `.npy` file, and set `align_mode = "homography"` +
-   `homography_path`.
-5. `DATA.num_classes` / `DATA.class_names` default to FLIR's 3 core classes
+3. Edit `config.py` → `DATA.root`. The `rgb`/`thermal` sub-configs already
+   point at the standard v2 paths; only change them if your layout differs.
+4. `DATA.num_classes` / `DATA.class_names` default to FLIR's 3 core classes
    (person, bicycle, car) — extend if you're using more of FLIR's 15
-   annotated categories.
+   annotated categories. Category sets are independent per modality in
+   principle; if RGB and thermal use different category id → name mappings
+   in their respective `coco.json`, this is handled automatically since
+   each `CocoDetectionDataset` builds its own `cat_id_to_idx` from its own
+   file — just make sure `DATA.class_names`' order is what you want both
+   models to share for reporting.
 
 ## Usage
 
 ```bash
 pip install -r requirements.txt
 
-# 1. Edit config.py: DATA.root, num_classes, and any hyperparameters.
+# Train each modality separately
+python train.py --modality rgb
+python train.py --modality thermal
 
-# 2. Train
-python train.py
+# Checkpoints land in ./checkpoints/rgb/ and ./checkpoints/thermal/
 
-# 3. Run on a single pair
-python inference.py --rgb sample_rgb.jpg --thermal sample_thermal.jpg \
-    --checkpoint checkpoints/best.pt --out result.jpg
+# Run inference with one modality
+python inference.py --modality rgb --image sample_rgb.jpg \
+    --checkpoint checkpoints/rgb/best.pt --out result.jpg
+
+# Optional: combine both models' detections at the box level, if you
+# separately have a genuinely time-synced RGB+thermal pair (e.g. from
+# video_rgb_test/video_thermal_test)
+python inference.py --modality rgb --image sample_rgb.jpg \
+    --checkpoint checkpoints/rgb/best.pt \
+    --fuse-modality thermal --fuse-image sample_thermal.jpg \
+    --fuse-checkpoint checkpoints/thermal/best.pt \
+    --out result_fused.jpg
 ```
+
+Note on that late-fusion option: it merges each model's independent
+detections via NMS across both sets of boxes, which is a much weaker
+form of fusion than combining features inside one network (what the
+original two-stream design did). It's useful as a quick way to combine
+two already-trained detectors, not a substitute for real feature-level
+fusion — that would need actual paired training data.
 
 ## What's implemented vs. what you'll likely want to add
 
-Implemented: two-stream backbones (ResNet18/34 or a TinyCNN fallback for
-CPU debugging), 3 fusion strategies, FPN neck, focal-loss classification +
-smooth-L1 box regression with proper anchor assignment, AMP training,
-checkpointing, single-pair inference with NMS.
+Implemented: single-modality ResNet18/34 (or TinyCNN debug) backbone, FPN
+neck, focal-loss classification + smooth-L1 box regression with anchor
+assignment, AMP training, per-modality checkpointing, inference with NMS,
+optional post-hoc box-level fusion across two trained models.
 
-Not implemented (reasonable next steps once the baseline trains):
+Not implemented (reasonable next steps):
 - mAP evaluation (currently only reports val loss) — plug in
   `torchmetrics.detection.MeanAveragePrecision` on top of `model.predict()`.
-- Data augmentation (random flip/crop/color-jitter). Thermal-safe
-  augmentation needs care — avoid color jitter on the thermal stream since
-  it's not a photometric RGB signal.
+- Data augmentation (random flip/crop/color-jitter).
 - Multi-GPU / DDP training.
-- The `align_mode="homography"` path needs an actual calibration matrix
-  per FLIR camera pair, which FLIR provides separately from the dataset
-  download.
+- If you want real feature-level fusion later: `video_rgb_test` +
+  `video_thermal_test` + `rgb_to_thermal_vid_map.json` is the one part of
+  this dataset that's actually frame-paired — worth inspecting if you want
+  to revisit a fused architecture on a smaller, genuinely paired set.
 
 ## File layout
 
 ```
-config.py            - all paths and hyperparameters
-data/flir_dataset.py  - paired RGB/thermal dataset + collate_fn
-models/backbone.py    - per-modality ResNet/TinyCNN backbones
-models/fusion.py      - concat / add / attention fusion modules
-models/head.py         - FPN neck + classification/regression head
-models/loss.py         - focal loss, smooth-L1, anchor target assignment
-models/detector.py     - assembles the full model + predict()
-utils/anchors.py       - multi-scale anchor generation
-utils/box_utils.py     - IoU, box encode/decode, NMS
-train.py               - training loop
-inference.py            - single-pair inference + visualization
+config.py                        - paths/hyperparameters, per-modality sub-configs
+data/coco_detection_dataset.py   - plain single-modality COCO dataset + collate_fn
+models/backbone.py               - ResNet/TinyCNN backbone (in_channels configurable)
+models/head.py                   - FPN neck + classification/regression head
+models/loss.py                   - focal loss, smooth-L1, anchor target assignment
+models/single_modality_detector.py - assembles backbone + FPN + head + predict()
+utils/anchors.py                 - multi-scale anchor generation
+utils/box_utils.py               - IoU, box encode/decode, NMS
+train.py                          - training loop, --modality rgb|thermal
+inference.py                      - single-modality inference + optional late fusion
+diagnose_pairing.py               - checks whether an RGB/thermal split is frame-paired
 ```

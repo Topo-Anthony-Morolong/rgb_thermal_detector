@@ -72,7 +72,7 @@ class TinyCNN(nn.Module):
 
 class StreamBackbone(nn.Module):
     """Wraps a ResNet (or TinyCNN) and exposes intermediate feature maps by
-    name, matching the `fusion_stages` config keys."""
+    name, matching the `fpn_stages` config keys."""
 
     OUT_CHANNELS = {
         "resnet18": {"layer1": 64, "layer2": 128, "layer3": 256, "layer4": 512},
