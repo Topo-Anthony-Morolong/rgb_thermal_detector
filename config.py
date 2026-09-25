@@ -36,7 +36,7 @@ class DataConfig:
     #   root/images_thermal_train/{data/, coco.json}
     #   root/images_rgb_val/{data/, coco.json}
     #   root/images_thermal_val/{data/, coco.json}
-    root: str = "/path/to/FLIR_ADAS_v2"
+    root: str = "/content/FLIR_ADAS_v2"
 
     img_size: Tuple[int, int] = (512, 640)  # (H, W)
     num_classes: int = 3  # FLIR ADAS core classes: person, bicycle, car (extend as needed)

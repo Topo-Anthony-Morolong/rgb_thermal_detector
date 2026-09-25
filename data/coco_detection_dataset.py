@@ -26,7 +26,15 @@ class CocoDetectionDataset(Dataset):
             coco = json.load(f)
 
         self.images: Dict[int, dict] = {im["id"]: im for im in coco["images"]}
-        self.cat_id_to_idx = {c["id"]: i for i, c in enumerate(sorted(coco["categories"], key=lambda c: c["id"]))}
+
+        # Explicitly map only the 3 target classes: person, bike (bicycle), and car
+        target_categories = {"person": 0, "bike": 1, "bicycle": 1, "car": 2}
+
+        self.cat_id_to_idx = {}
+        for cat in coco["categories"]:
+            name = cat["name"].lower()
+            if name in target_categories:
+                self.cat_id_to_idx[cat["id"]] = target_categories[name]
 
         self.anns_by_image: Dict[int, List[dict]] = {}
         for ann in coco["annotations"]:
