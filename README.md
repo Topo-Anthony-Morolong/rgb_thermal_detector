@@ -55,6 +55,16 @@ instead of forcing a fusion architecture onto unpaired data.
    file — just make sure `DATA.class_names`' order is what you want both
    models to share for reporting.
 
+## Image preprocessing
+
+Training and inference share `utils/image_preprocessing.py`. Images are
+converted to RGB or 8-bit grayscale, resized to fit `DATA.img_size` while
+preserving aspect ratio, then centered on a canvas filled with value 114.
+COCO boxes receive the same scale and padding transform. RGB inputs use
+ImageNet channel normalization; thermal inputs remain single-channel and use
+`(x - 0.5) / 0.5` normalization. Thermal files are treated as display
+intensities, not radiometric temperature measurements.
+
 ## Usage
 
 ```bash

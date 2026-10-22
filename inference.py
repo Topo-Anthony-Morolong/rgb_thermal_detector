@@ -19,26 +19,19 @@ independently-trained detectors post-hoc. See --thermal-image/--thermal-checkpoi
 
 import argparse
 import torch
-import torchvision.transforms.functional as TF
 from PIL import Image, ImageDraw
 from torchvision.ops import batched_nms
 
 from config import DATA, MODEL
 from models.single_modality_detector import SingleModalityDetector
+from utils.image_preprocessing import image_to_tensor, letterbox_image
 
 
 def load_image(path, img_size, in_channels):
-    H, W = img_size
-    mode = "RGB" if in_channels == 3 else "L"
-    img = Image.open(path).convert(mode).resize((W, H), Image.BILINEAR)
-
-    tensor = TF.to_tensor(img)
-    if in_channels == 3:
-        tensor = TF.normalize(tensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    else:
-        tensor = TF.normalize(tensor, mean=[0.5], std=[0.5])
-
-    display_img = Image.open(path).convert("RGB").resize((W, H), Image.BILINEAR)
+    source = Image.open(path)
+    display_img, _ = letterbox_image(source, img_size, in_channels=3)
+    model_img, _ = letterbox_image(source, img_size, in_channels=in_channels)
+    tensor = image_to_tensor(model_img, in_channels)
     return display_img, tensor.unsqueeze(0)
 
 

@@ -12,7 +12,8 @@ from typing import Dict, List
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
-import torchvision.transforms.functional as TF
+
+from utils.image_preprocessing import image_to_tensor, letterbox_image
 
 
 class CocoDetectionDataset(Dataset):
@@ -46,28 +47,22 @@ class CocoDetectionDataset(Dataset):
         # directly against image_dir's parent, not image_dir itself.
         img_path = os.path.join(os.path.dirname(self.image_dir), meta["file_name"])
 
-        mode = "RGB" if self.in_channels == 3 else "L"
-        img = Image.open(img_path).convert(mode)
-        orig_w, orig_h = img.size
-
-        H, W = self.img_size
-        img = img.resize((W, H), Image.BILINEAR)
-        sx, sy = W / orig_w, H / orig_h
+        img = Image.open(img_path)
+        img, (sx, sy, pad_left, pad_top) = letterbox_image(img, self.img_size, self.in_channels)
 
         boxes, labels = [], []
         for ann in self.anns_by_image.get(img_id, []):
             if ann["category_id"] not in self.cat_id_to_idx:
                 continue
             x, y, w, h = ann["bbox"]  # COCO format: x, y, width, height
-            x1, y1, x2, y2 = x * sx, y * sy, (x + w) * sx, (y + h) * sy
+            x1 = x * sx + pad_left
+            y1 = y * sy + pad_top
+            x2 = (x + w) * sx + pad_left
+            y2 = (y + h) * sy + pad_top
             boxes.append([x1, y1, x2, y2])
             labels.append(self.cat_id_to_idx[ann["category_id"]])
 
-        img_tensor = TF.to_tensor(img)
-        if self.in_channels == 3:
-            img_tensor = TF.normalize(img_tensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        else:
-            img_tensor = TF.normalize(img_tensor, mean=[0.5], std=[0.5])
+        img_tensor = image_to_tensor(img, self.in_channels)
 
         target = {
             "boxes": torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32),
