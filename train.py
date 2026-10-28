@@ -14,6 +14,7 @@ import time
 import argparse
 import torch
 from torch.utils.data import DataLoader
+from torchmetrics.detection import MeanAveragePrecision
 
 from config import DATA, MODEL, TRAIN
 from data.coco_detection_dataset import CocoDetectionDataset, collate_fn
@@ -25,6 +26,7 @@ def build_dataloaders(modality_cfg):
     train_set = CocoDetectionDataset(
         root=DATA.root, ann_path=modality_cfg.train_ann, image_dir=modality_cfg.train_dir,
         img_size=DATA.img_size, in_channels=modality_cfg.in_channels,
+        augment=DATA.augment,
     )
     val_set = CocoDetectionDataset(
         root=DATA.root, ann_path=modality_cfg.val_ann, image_dir=modality_cfg.val_dir,
@@ -83,6 +85,26 @@ def run_epoch(model, loader, criterion, optimizer, scaler, device, train=True, e
     return {"loss": total_loss / n_batches, "cls_loss": total_cls / n_batches, "box_loss": total_box / n_batches}
 
 
+@torch.no_grad()
+def evaluate_detection_metrics(model, loader, device):
+    metric = MeanAveragePrecision(box_format="xyxy", class_metrics=True)
+    model.eval()
+
+    for imgs, targets in loader:
+        predictions = model.predict(imgs.to(device))
+        metric.update(
+            predictions,
+            [{"boxes": target["boxes"], "labels": target["labels"]} for target in targets],
+        )
+
+    results = metric.compute()
+    return {
+        "map": float(results["map"]),
+        "map50": float(results["map_50"]),
+        "mar100": float(results["mar_100"]),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--modality", choices=["rgb", "thermal"], required=True)
@@ -97,11 +119,12 @@ def main():
     criterion = DetectionLoss(DATA.num_classes, TRAIN.focal_alpha, TRAIN.focal_gamma, TRAIN.box_loss_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=TRAIN.lr, weight_decay=TRAIN.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=TRAIN.epochs)
-    scaler = torch.cuda.amp.GradScaler() if (TRAIN.amp and device.type == "cuda") else None
+    scaler = torch.amp.GradScaler("cuda") if (TRAIN.amp and device.type == "cuda") else None
 
     ckpt_dir = os.path.join(TRAIN.checkpoint_dir, modality_cfg.name)
     os.makedirs(ckpt_dir, exist_ok=True)
     best_val_loss = float("inf")
+    epochs_without_improvement = 0
 
     for epoch in range(TRAIN.epochs):
         train_stats = run_epoch(model, train_loader, criterion, optimizer, scaler, device, train=True, epoch=epoch)
@@ -111,15 +134,24 @@ def main():
         if epoch % TRAIN.val_every == 0:
             val_stats = run_epoch(model, val_loader, criterion, optimizer, scaler, device, train=False, epoch=epoch)
             print(f"[{modality_cfg.name}][epoch {epoch}] val:   {val_stats}")
+            val_metrics = evaluate_detection_metrics(model, val_loader, device)
+            print(f"[{modality_cfg.name}][epoch {epoch}] metrics: {val_metrics}")
 
             torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_stats["loss"],
                         "modality": modality_cfg.name}, os.path.join(ckpt_dir, "last.pt"))
 
             if val_stats["loss"] < best_val_loss:
                 best_val_loss = val_stats["loss"]
+                epochs_without_improvement = 0
                 torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_stats["loss"],
                             "modality": modality_cfg.name}, os.path.join(ckpt_dir, "best.pt"))
                 print(f"[{modality_cfg.name}][epoch {epoch}] new best val_loss={best_val_loss:.4f}, checkpoint saved")
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= TRAIN.early_stopping_patience:
+                    print(f"[{modality_cfg.name}] early stopping at epoch {epoch}; "
+                          f"best val_loss={best_val_loss:.4f}")
+                    break
 
 
 if __name__ == "__main__":

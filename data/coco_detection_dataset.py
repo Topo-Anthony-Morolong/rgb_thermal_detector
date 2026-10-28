@@ -12,16 +12,18 @@ from typing import Dict, List
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
+import torchvision.transforms.functional as TF
 
 from utils.image_preprocessing import image_to_tensor, letterbox_image
 
 
 class CocoDetectionDataset(Dataset):
     def __init__(self, root: str, ann_path: str, image_dir: str,
-                 img_size=(512, 640), in_channels: int = 3):
+                 img_size=(512, 640), in_channels: int = 3, augment: bool = False):
         self.image_dir = os.path.join(root, image_dir)
         self.img_size = img_size  # (H, W)
         self.in_channels = in_channels
+        self.augment = augment
 
         with open(os.path.join(root, ann_path)) as f:
             coco = json.load(f)
@@ -69,6 +71,19 @@ class CocoDetectionDataset(Dataset):
             y2 = (y + h) * sy + pad_top
             boxes.append([x1, y1, x2, y2])
             labels.append(self.cat_id_to_idx[ann["category_id"]])
+
+        if self.augment:
+            if torch.rand(()) < 0.5:
+                img = TF.hflip(img)
+                image_width = img.width
+                boxes = [[image_width - x2, y1, image_width - x1, y2]
+                         for x1, y1, x2, y2 in boxes]
+
+            if self.in_channels == 1 and torch.rand(()) < 0.5:
+                brightness = float(torch.empty(1).uniform_(0.85, 1.15).item())
+                contrast = float(torch.empty(1).uniform_(0.8, 1.2).item())
+                img = TF.adjust_brightness(img, brightness)
+                img = TF.adjust_contrast(img, contrast)
 
         img_tensor = image_to_tensor(img, self.in_channels)
 

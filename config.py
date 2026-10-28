@@ -39,6 +39,7 @@ class DataConfig:
     root: str = "/content/FLIR_ADAS_v2"
 
     img_size: Tuple[int, int] = (512, 640)  # (H, W)
+    augment: bool = True
     num_classes: int = 3  # FLIR ADAS core classes: person, bicycle, car (extend as needed)
     class_names: List[str] = field(default_factory=lambda: ["person", "bicycle", "car"])
 
@@ -52,7 +53,7 @@ class DataConfig:
         name="thermal", in_channels=1,
         train_ann="images_thermal_train/coco.json", train_dir="images_thermal_train/data",
         val_ann="images_thermal_val/coco.json", val_dir="images_thermal_val/data",
-        pretrained=False,
+        pretrained=True,
     ))
 
     def modality(self, name: str) -> ModalityConfig:
@@ -69,10 +70,10 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
-    epochs: int = 50
+    epochs: int = 20
     batch_size: int = 8
-    lr: float = 1e-4
-    weight_decay: float = 1e-4
+    lr: float = 3e-5
+    weight_decay: float = 5e-4
     num_workers: int = 4
     device: str = "cuda"
     focal_alpha: float = 0.25
@@ -83,6 +84,7 @@ class TrainConfig:
     log_every: int = 20
     val_every: int = 1
     amp: bool = True  # mixed precision
+    early_stopping_patience: int = 4
 
 
 DATA = DataConfig()
