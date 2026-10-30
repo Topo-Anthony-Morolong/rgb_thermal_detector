@@ -80,6 +80,19 @@ python train.py --modality thermal
 python inference.py --modality rgb --image sample_rgb.jpg \
     --checkpoint checkpoints/rgb/best.pt --out result.jpg
 
+# Evaluate a COCO-format test split, saving annotated images, predictions.json,
+# and metrics.json under the selected output directory
+python inference.py --modality rgb \
+    --coco-json /tmp/FLIR_ADAS_v2/video_rgb_test/coco.json \
+    --checkpoint checkpoints/rgb/best.pt --out-dir results/video_rgb_test
+python inference.py --modality thermal \
+    --coco-json /tmp/FLIR_ADAS_v2/video_thermal_test/coco.json \
+    --checkpoint checkpoints/thermal/best.pt --out-dir results/video_thermal_test
+
+# Run a video file or a live camera (press q to stop when using --show)
+python inference.py --modality rgb --source 0 \
+    --checkpoint checkpoints/rgb/best.pt --show --out-video results/live_rgb.mp4
+
 # Optional: combine both models' detections at the box level, if you
 # separately have a genuinely time-synced RGB+thermal pair (e.g. from
 # video_rgb_test/video_thermal_test)
